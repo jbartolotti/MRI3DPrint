@@ -1,0 +1,202 @@
+#!/usr/bin/bash
+
+
+input=$1
+dest=$2
+filename=$3
+# Check if the fourth argument is given
+if [ -n "$4" ]; then
+  # If yes, assign it to a local variable and validate it as an email address
+email=$4
+  if ! [[ $email =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+    # If not valid, report an error and exit
+    echo "Invalid email address, exiting"
+    exit 1
+  fi
+fi
+
+# Define a help summary that explains the usage and options of the function
+function display_help {
+  echo "Usage: make3dBrain [option...] <input> <output_dir> <output_name> [email]"
+  echo
+  echo "This function processes anatomical brain data and generates"
+  echo "left and right hemisphere .stl files for 3dPrinting."
+  echo "The input data can be a directory containing DICOM files, a single NIFTI file,"
+  echo "or a freesurfer output folder containing lh.pial and rh.pial files."
+  echo "The output directory is where the output stl files will be saved."
+  echo "The output name is the name of the output file without extension (e.g., My_Brain)."
+  echo "The email is an optional argument that specifies an email address to send a notification"
+  echo "and further post-processing instructions when the function is complete."
+  echo
+  echo "3d Print Tips"
+  echo "Post-process the left and right hemisphere .stl Meshes before printing."
+  echo "See https://www.instructables.com/3D-print-your-own-brain/"
+  echo "Install MeshLab from https://www.meshlab.net/#download. "
+  echo "Start MeshLab and import My_Brain_lh.stl and My_Brain_rh.stl  via 'File' -> 'import mesh'."
+  echo "Click on 'Filters' -> 'Mesh Layer' -> 'Flatten Visible Layers' and apply."
+  echo "Now your brain mesh is RH_LH combined. Simplify vertices before printing."
+  echo "'Filters' -> 'Remeshing, Simplification, Reconstruction' -> 'Quadratic Edge Collapse Decimation'"
+  echo "Enter your number of faces (try 100,000). Click apply."
+  echo "Finally, use 'Filters' -> 'Smoothing, Fairing and Deformation' -> 'Laplacian Smooth' with 3 steps and just click the apply button once."
+  echo "You can mess around with these settings some more to get the look you want." 
+  echo "HC Laplacian Smooth is another good option."
+  echo "When done, use 'File' -> 'Export Mesh As' and save as an .stl file for printing"
+  echo "Print the brain at 30% scale. If using transparent filament, print with 0% fill density for a print time of about 4 hours and material use of about 17g (about \$0.50 at \$30/kg filament). When transparent, the print can be lit from below."
+  echo "With solid filament, you can print with 15% fill for a sturdier print. This increases print time to about 4.5 hours and material use to about 20g. (about \$0.60)"
+  echo "In the 3dPrinter software, rotate the print with the occipital lobe touching the build plate. Build with supports touching buildplate at 60 degrees."
+  echo 
+  echo "Options:"
+  echo " -h, --help     Display this help summary and exit"
+  # You can add more options here if you want
+}
+
+# Check if the first argument is -h or --help
+if [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
+  # If yes, display the help summary and exit
+  display_help
+  exit 0
+fi
+
+
+# If the user supplies an email address not in the kumc.edu domain, the finished message will send to the admin so that they can forward it.
+admin="jbartolotti2@kumc.edu"
+local_processing_dir="~/.3dPrintBrain/$filename"
+mkdir -p $dest
+mkdir -p $local_processing_dir
+
+# construct additional filenames needed and directories
+
+
+# Check if the input is a directory
+if [ -d "$input" ]; then
+    # If yes, check if it contains dicom files or pial files
+    dicom_count=$(find "$input" -type f -name "*.dcm" | wc -l)
+    pial_count=$(find "$input" -type f -name "*.pial" | wc -l)
+    if [ $dicom_count -gt 0 ]; then
+      echo "Input is a DICOM directory. Converting dicom to nifti, nifti to .pial surface meshes using freesurfer, and .pial to .stl"
+      # Check if dcm2niix is on the path
+      doexit=0
+      if ! command -v dcm2niix >/dev/null; then
+        # If not, report an error and exit
+        echo "dcm2niix command not found. Add to path with 'load mricron' then run again."
+        doexit=1
+      fi
+      if ! command -v mris_convert >/dev/null; then
+        echo "mris_convert command not found. Add to path with 'load freesurfer' then run again."
+        doexit=1
+      fi
+      if [ $doexit -eq 1 ]; then
+        echo "Exiting."
+        exit 1
+      fi
+
+      # Convert dicom to nifti, then rename output file
+      nii_filename="${filename}.nii"
+      nii_filepath="${dest}/${nii_filename}"
+      nii_localfilepath="${local_processing_dir}/${filename}"
+
+      dcm2niix -o $dest -f $nii_filepath $input
+      #niiout=$(ls $dest | grep .nii)
+      #niiout_filepath=$(printf '%s/%s' $dest $niiout)
+      #mv $niiout_filepath $nii_filepath
+
+      echo "NIFTI conversion complete. Proceeding with surface reconstruction"
+      # set freesurfer subjects directory
+      SUBJECTS_DIR=$local_processing_dir
+
+      # freesurfer recon_all to create surface .pial file of nifti brain 
+      recon-all -s $nii_localfilepath -all -i $nii_filepath
+
+      # Let it run! for a long time! (about 5 hours on synapse)
+
+      # Convert the resulting .pial files to printable .stl files
+      mris_convert "${nii_localfilepath}/surf/rh.pial" "${dest}/${filename}_rh.stl"
+      mris_convert "${nii_localfilepath}/surf/lh.pial" "${dest}/${filename}_lh.stl"
+    elif [ $pial_count -gt 0 ]; then
+      echo "Input is a directory with .pial surface meshes. Converting .pial to .stl"
+      # Check if mris_convert is on the path
+      if ! command -v mris_convert >/dev/null; then
+        # If not, report an error and exit
+        echo "mris_convert command not found. Add to path with 'load freesurfer'. Exiting"
+        exit 1
+      fi
+      # Convert the resulting .pial files to printable .stl files
+      mris_convert "${input}/rh.pial" "${dest}/${filename}_rh.stl"
+      mris_convert "${input}/lh.pial" "${dest}/${filename}_lh.stl"
+    else
+    # If not, report an error and exit
+      echo "Input is not a valid directory type, exiting."
+      exit 1
+    fi
+else
+  # If not, check if the input is a regular file
+  if [ -f "$input" ]; then
+    # If yes, get the file extension
+    ext=${input##*.}
+    # Check if the extension is nifti
+    if [ "$ext" == "nii" ]; then
+      echo "Input is a NIFTI file. Converting nifti .nii to .pial surface meshes using freesurfer, and .pial to .stl"
+        # Check if mris_convert is on the path
+      if ! command -v mris_convert >/dev/null; then
+        # If not, report an error and exit
+        echo "mris_convert command not found. Add to path with 'load freesurfer'. Exiting"
+        exit 1
+      fi
+      nii_filepath="${dest}/${filename}.nii"
+      nii_localfilepath="${local_processing_dir}/${filename}"
+
+      cp $input $nii_filepath
+
+      # set freesurfer subjects directory
+      SUBJECTS_DIR=$local_processing_dir
+
+      # freesurfer recon_all to create surface .pial file of nifti brain 
+      recon-all -s $nii_localfilepath -all -i $nii_filepath
+      # Let it run! for a long time! (about 5 hours on synapse)
+      
+      # Convert the resulting .pial files to printable .stl files
+      mris_convert "${nii_localfilepath}/surf/rh.pial" "${dest}/${filename}_rh.stl"
+      mris_convert "${nii_localfilepath}/surf/lh.pial" "${dest}/${filename}_lh.stl"
+  else
+    # If not, report an error and exit
+    echo "Input is not a valid file type, exiting. Please supply a .nii file, or a dicom folder, or a freesurfer surf folder."
+    exit 1
+  fi
+else
+  # If not, report an error and exit
+  echo "Input is not a file or directory, exiting. See input options with: make3dBrain --help"
+  exit 1
+fi
+fi
+
+
+# If email argument was given, send a notification using mutt. Otherwise print it to the screen.
+if [ -n "$email" ]; then
+    # Define a subject and a body for the email
+    subject="3dPrinting file for ${filename} ready for post-processing"
+    body="\\n\\nRight and Left Hemisphere STL files created in ${dest}. \\nPost-process the Meshes before printing.\\nSee https://www.instructables.com/3D-print-your-own-brain/ \\n\\nInstall MeshLab from https://www.meshlab.net/#download. \\nStart MeshLab and import ${filename}_lh.stl and ${filename}_rh.stl  via 'File' -> 'import mesh'.\\nClick on 'Filters' -> 'Mesh Layer' -> 'Flatten Visible Layers' and apply.\\nNow your brain mesh is RH_LH combined. Simplify vertices before printing.\\n'Filters' -> 'Remeshing, Simplification, Reconstruction' -> 'Quadratic Edge Collapse Decimation'\\nEnter your number of faces (try 100,000). Click apply.\\nFinally, use 'Filters' -> 'Smoothing, Fairing and Deformation' -> 'Laplacian Smooth' with 3 steps and just click the apply button once.\\nYou can mess around with these settings some more to get the look you want. HC Laplacian Smooth is another good option.\\nWhen done, use 'File' -> 'Export Mesh As' and save as a single .stl file for printing.\\n\\nPrint the brain at 30% scale. If using transparent filament, print with 0% fill density for a print time of about 4 hours and material use of about 17g (about \$0.50 at \$30/kg filament). When transparent, the print can be lit from below.\\nWith solid filament, you can print with 15% fill for a sturdier print. This increases print time to about 4.5 hours and material use to about 20g. (about \$0.60)\\nIn the 3dPrinter software, rotate the brain with the occipital lobe touching the build plate for a clean print. Build with supports touching buildplate at 60 degrees. Export the .gcode and print this file on the printer."
+    domain=${email#*@}
+    if [ "$domain" == "kumc.edu" ]; then
+      # If it's @kumc.edu, send the email without cc
+      echo -e "$body" | mutt -s "$subject" -- "$email"
+    else
+      # If not, send the email with cc to admin
+      echo -e "$body" | mutt -s "$subject" -c "$admin" -- "$email"
+    fi
+    # Print a confirmation message
+    echo "Email notification sent to $email"
+else
+  # Refine the mesh in Meshlab (or something else)
+  printf '\n\nRight and Left Hemisphere STL files created in %s. \n' $dest
+  printf "Post-process the Meshes before printing.\nSee https://www.instructables.com/3D-print-your-own-brain/\n\n"
+  printf "Install MeshLab from https://www.meshlab.net/#download. \n(NOTE: MeshLab offers a scripting tool, PyMeshLab, which may be implemented here at a later date to simplify and standardize the process.)\nStart MeshLab and import %s_lh.stl and %s_rh.stl  via 'File' -> 'import mesh'.\n" $filename $filename
+  printf "Click on 'Filters' -> 'Mesh Layer' -> 'Flatten Visible Layers' and apply.\nNow your brain mesh is RH_LH combined. Simplify vertices before printing.\n'Filters' -> 'Remeshing, Simplification, Reconstruction' -> 'Quadratic Edge Collapse Decimation'\nEnter your number of faces (try 100,000). Click apply.\nFinally, use 'Filters' -> 'Smoothing, Fairing and Deformation' -> 'Laplacian Smooth' with 3 steps and just click the apply button once.\nYou can mess around with these settings some more to get the look you want. HC Laplacian Smooth is another good option.\nWhen done, use 'File' -> 'Export Mesh As' and save as an .stl file for printing.\n\n"
+  printf "Print the brain at 30%% scale. If using transparent filament, print with 0%% fill density for a print time of about 4 hours (with 0%% fill) and material use of about 17g (about \$0.50 at \$30/kg filament). When transparent, the print can be lit from below.\nWith solid filament, you can print with 15%% fill for a sturdier print. This increases print time to about 4.5 hours and material use to about 20g. (about \$0.60)\nRotate with the occipital lobe touching the build plate. Build with supports touching buildplate at 60 degrees.\n"
+  
+fi
+
+
+
+
+
+
